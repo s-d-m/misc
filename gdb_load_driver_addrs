@@ -1,0 +1,199 @@
+# -*- gdb-script -*-
+
+# This is a gsb script to automatically load the symbols of a linux
+# kernel module when loading it,
+# This is useful to debug the init phase of a kernel module
+
+define my_poor_print
+  set $my_poor_print_idx = 0
+  while ($arg0[$my_poor_print_idx] != 0)
+    printf "%c", $arg0[$my_poor_print_idx]
+    set $my_poor_print_idx = $my_poor_print_idx + 1
+  end
+
+end
+
+document my_poor_print
+print a string without using malloc (for in-kernel debugging)
+end
+
+
+define gdb_strcmp
+  set $gdb_strcmp_idx = 0
+  while ($arg0[$gdb_strcmp_idx] != 0) && ($arg1[$gdb_strcmp_idx] != 0) && ($arg0[$gdb_strcmp_idx] == $arg1[$gdb_strcmp_idx])
+    set $gdb_strcmp_idx = $gdb_strcmp_idx + 1
+  end
+  set $gdb_strcmp_status = $gdb_strcmp_status + ($arg0[$gdb_strcmp_idx] - $arg1[$gdb_strcmp_idx] == 0)
+end
+
+
+document gdb_strcmp
+takes two strings as parameters.
+increment the variable $gdb_strcmp_status if the strings are the same.
+
+The way to call this function if:
+
+  (gdb)   set $gdb_strcmp_status = 0
+  (gdb)   gdb_strcmp "some string"   "another string"
+  (gdb)
+  (gdb)   if $gdb_strcmp_status != 0
+  (gdb)     # strings are same
+  (gdb)     # do something with it
+  (gdb)   else
+  (gdb)     # strings are *NOT* the same
+  (gdb)     # do something else with it
+  (gdb)   end
+end
+
+
+
+set $text_addr_pos=-1
+set $text_addr=0
+define set_text_addr_pos
+  dont-repeat
+
+  set $nb_sections=mod->sect_attrs->nsections
+  set $pos=0
+  ### unfortunately, I can't write the while loop like this, since gdb requires a
+  ### malloc function to do so. (which of course we haven't as we are working in
+  ### the kernel. Thus it is implemented the other way
+  # while ($pos < $nb_sections) && (mod->sect_attrs->attrs[$pos].name != ".text")
+  #   set $pos= $pos + 1
+  # end
+
+  while ($pos < $nb_sections)  && ( (mod->sect_attrs->attrs[$pos].name[0] != '.') || (mod->sect_attrs->attrs[$pos].name[1] != 't') || (mod->sect_attrs->attrs[$pos].name[2] != 'e') || (mod->sect_attrs->attrs[$pos].name[3] != 'x') || (mod->sect_attrs->attrs[$pos].name[4] != 't') || (mod->sect_attrs->attrs[$pos].name[5] != '\0') )
+    set $pos = $pos + 1
+  end
+
+  if ($pos == $nb_sections)
+    print "ERROR: '.text' section not found in module."
+  else
+    set $text_addr_pos = $pos
+    set $text_addr = mod->sect_attrs->attrs[$pos].address
+  end
+
+end
+
+document set_text_addr_pos
+set $text_addr_pos and $text_addr to the position and address of the ".text"
+section found in the section array.
+end
+
+
+set $section_name = 0
+set $section_address = 0
+
+
+define load_section_addrs_driver
+
+  # $arg0 = name of module (without .ko)
+  # $arg1 = text addr
+  # $arg2 = section name
+  # $arg3 = section addr
+  eval "add-symbol-file /path/to/module/%s.ko %p -s %s %p\n", $arg0, $arg1, $arg2, $arg3
+end
+
+define load_section_addrs
+  dont-repeat
+
+  set_text_addr_pos
+
+  set $pos=0
+  set $nb_sections=mod->sect_attrs->nsections
+
+  while ($pos < $nb_sections)
+    if ($pos != $text_addr_pos)
+      set $section_name = mod->sect_attrs->attrs[$pos].name
+      set $section_address = mod->sect_attrs->attrs[$pos].address
+
+      load_section_addrs_driver mod->name $text_addr $section_name $section_address
+    end
+
+    set $pos = $pos + 1
+  end
+end
+
+
+document load_section_addrs
+When loading a module, load the sections name and address into gdb.
+end
+
+# hardcoded value
+# To find the right line number is the output of
+# sh> awk '/return do_init_module\(mod\);/ {print NR}'  <PATH_TO_YOUR_KERNEL_SOURCE_TREE>/kernel/module.c
+# break kernel/module.c:3313
+#break do_init_module
+
+#file /home/username/linux-3.13/vmlinux
+
+break kernel/module.c:3297
+commands $bpnum
+
+  set $gdb_strcmp_status = 0
+  gdb_strcmp mod->name "Whitelist_module_1"
+  gdb_strcmp mod->name "Whitelist_module_2_without_.ko_at_end"
+  gdb_strcmp mod->name "here_we_set_the_modules_we"
+  gdb_strcmp mod->name "are_interested_in_as_we_don't"
+  gdb_strcmp mod->name "want_to_load_all_modules"
+
+  if $gdb_strcmp_status != 0
+    # module is one we are interested in. Load symbols!
+    load_section_addrs
+  end
+  continue
+end
+
+set breakpoint pending on
+set non-stop off
+
+# set logging off
+# set logging file /tmp/gdb_logs
+# set logging overwrite on
+# set logging redirect off
+
+# define log_backtrace
+#   set $log_backtrace_id_string = $arg0
+
+#   set logging off
+#   set logging overwrite off
+#   set logging redirect off
+#   set annotate 0
+#   set logging on
+#   echo ----------[begin
+#   my_poor_print " "
+#   my_poor_print $log_backtrace_id_string
+#   my_poor_print " "
+#   echo  backtrace]-------\n
+
+#   backtrace 30
+
+#   echo ----------[end
+#   my_poor_print "   "
+#   my_poor_print $log_backtrace_id_string
+#   my_poor_print " "
+#   echo  backtrace]-------\n
+#   set logging off
+# end
+
+# define log_alloc_backtrace
+#   log_backtrace "alloc"
+# end
+
+
+# define log_release_backtrace
+#   log_backtrace "free"
+# end
+
+
+# break file_from_the_module_we_want_to_debug.c:111
+# commands $bpnum
+#   log_alloc_backtrace
+#   continue
+# end
+
+
+# break other_file_from_a_module_we_want_to_debug.c:222
+# commands $bpnum
+#   log_release_backtrace
+#   continue
+# end
